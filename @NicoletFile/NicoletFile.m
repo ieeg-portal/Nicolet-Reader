@@ -208,7 +208,7 @@ classdef NicoletFile < handle
       
 %       fseek(h, 188664,'bof');
 %       Qindex  = struct();
-%       for i = 1:min([obj.Qi.LQi 100000])
+%       for i = 1:obj.Qi.LQi
 % %         Qindex(i).ftel = ftell(h);
 %         Qindex(i).index = fread(h,2,'uint16')';  %4
 %         Qindex(i).misc1 = fread(h,1,'uint32');   %8
@@ -277,7 +277,7 @@ classdef NicoletFile < handle
         id = fread(h,1,'uint64');
         switch id
           case {7,8}
-            unix_time = (fread(h,1, 'double')*(3600*24)) - 2208988800; %8 
+            unix_time = (fread(h,1, 'double')*(3600*24)) - 2209161600;% 2208988800; %8 
             obj.segments(i).dateStr = datestr(unix_time/86400 + datenum(1970,1,1));
             value = datevec( obj.segments(i).dateStr );
             value = value([3 2 1]);
@@ -464,7 +464,7 @@ classdef NicoletFile < handle
       fseek(h, segmentInstance.offset,'bof');
       obj.segments = struct();
       for i = 1: nrSegments        
-        unix_time = (fread(h,1, 'double')*(3600*24)) - 2208988800; %8 
+        unix_time = (fread(h,1, 'double')*(3600*24)) - 2209161600;% 2208988800; %8 
         obj.segments(i).dateStr = datestr(unix_time/86400 + datenum(1970,1,1));
         datev = datevec( obj.segments(i).dateStr );
         obj.segments(i).startDate = datev(1:3);
