@@ -268,7 +268,7 @@ classdef NicoletFile < handle
       indexInstance = Index(find([Index.sectionIdx]==ifnoIdx,1));
       fseek(h, indexInstance.offset,'bof');
       guid = fread(h, 16, 'uint8'); %#ok<NASGU>
-      lSection = fread(h, 1, 'uint64');
+      lSection = fread(h, 1, 'uint64'); %#ok<NASGU>
 %       reserved = fread(h, 3, 'uint16'); %#ok<NASGU>
       nrValues = fread(h,1,'uint64');
       nrBstr = fread(h,1,'uint64');
@@ -276,7 +276,12 @@ classdef NicoletFile < handle
       for i = 1:nrValues
         id = fread(h,1,'uint64');
         switch id
-          case {7,8,23,24}
+          case {7,8}
+            unix_time = (fread(h,1, 'double')*(3600*24)) - 2208988800; %8 
+            obj.segments(i).dateStr = datestr(unix_time/86400 + datenum(1970,1,1));
+            value = datevec( obj.segments(i).dateStr );
+            value = value([3 2 1]);
+          case {23,24}
             value = fread(h,1,'double');
           otherwise
             value = 0;
@@ -290,25 +295,8 @@ classdef NicoletFile < handle
         id  = strSetup(i);
         value = deblank(cast(fread(h, strSetup(i+1) + 1, 'uint16'),'char')');
         info.(infoProps{id}) = value;
-        
       end
-      
 
-% 
-%       curIdx = 64;
-%       while curIdx<lSection
-%         % Read entryID
-%         id = fread(h, 1, 'uint16');
-%         reserved = fread(h, 3, 'uint16'); %#ok<NASGU>
-%         switch id
-%           case 7
-%             info.dob = fread(h, 1, 'double');
-%             curIdx = curIdx + 32 + 64;
-%           otherwise
-%         end
-%         
-%         curIdx=curIdx+1;
-%       end
       obj.patientInfo = info;
       
       %% Get INFOGUID
@@ -528,7 +516,7 @@ classdef NicoletFile < handle
      
       % Assert range is 1x2 vector
       assert(length(range) == 2, 'Range is [firstIndex lastIndex]');
-      assert(length(segment) == 1, 'Segment mustssh  be single value.');
+      assert(length(segment) == 1, 'Segment must be single value.');
 
       % Get cumulative sum segments.
       cSumSegments = [0 cumsum([obj.segments.duration])];
