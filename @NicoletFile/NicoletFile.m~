@@ -259,7 +259,7 @@ classdef NicoletFile < handle
       info = struct();
       
       infoProps = { 'patientID', 'firstName','middleName','lastName',...
-        'altID','mothersMaidenName','DOB','DOD','street','sexID','phone',...
+        'altID','mothersMaidenName','DOB','DOD','street','sex','phone',...
         'notes','dominance','siteID','suffix','prefix','degree','apartment',...
         'city','state','country','language','height','weight','race','religion',...
         'maritalStatus'};
@@ -286,29 +286,27 @@ classdef NicoletFile < handle
       
       strSetup = fread(h,nrBstr*2,'uint64');
       
-      for i=1:2:(nrBstr*2)
-        id  = strSetup(i);
-        value = deblank(cast(fread(h, strSetup(i+1) + 1, 'uint16'),'char')');
-        info.(infoProps{id}) = value;
-        
+      for i=1:2nrBstr
+        id  = strSetup(
       end
       
 
-% 
-%       curIdx = 64;
-%       while curIdx<lSection
-%         % Read entryID
-%         id = fread(h, 1, 'uint16');
-%         reserved = fread(h, 3, 'uint16'); %#ok<NASGU>
-%         switch id
-%           case 7
-%             info.dob = fread(h, 1, 'double');
-%             curIdx = curIdx + 32 + 64;
-%           otherwise
-%         end
-%         
-%         curIdx=curIdx+1;
-%       end
+      aux = fread(h,18,'uint64');
+
+      curIdx = 64;
+      while curIdx<lSection
+        % Read entryID
+        id = fread(h, 1, 'uint16');
+        reserved = fread(h, 3, 'uint16'); %#ok<NASGU>
+        switch id
+          case 7
+            info.dob = fread(h, 1, 'double');
+            curIdx = curIdx + 32 + 64;
+          otherwise
+        end
+        
+        curIdx=curIdx+1;
+      end
       obj.patientInfo = info;
       
       %% Get INFOGUID
