@@ -23,6 +23,10 @@ classdef NicoletFile < handle
   %   the Nicolet .e file writer which sometimes renders the TSINFO structures
   %   unreadable on disk (verify with hex-edit). Therefore, this class only
   %   uses the first TSINFO structure found in the .e file.
+  %
+  %
+  
+ 
   
   %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
   % Copyright 2013 Trustees of the University of Pennsylvania
@@ -40,10 +44,14 @@ classdef NicoletFile < handle
   % limitations under the License.
   %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+  % Joost Wagenaar, Jan 2015
+  % Cristian Donos, Dec 2015
+  
   properties
     fileName
     patientInfo
     segments
+    eventMarkers
   end
   
   properties (Hidden)
@@ -53,6 +61,7 @@ classdef NicoletFile < handle
     tsInfo
     chInfo
     notchFreq
+    montage
     Qi
     Qii
     allIndexIDs
@@ -240,11 +249,17 @@ classdef NicoletFile < handle
         
         fseek(h, nextIndexPointer, 'bof');
         nrIdx = fread(h,1, 'uint64');
+        Index(curIdx + nrIdx).sectionIdx = 0;   % Preallocate next set of indices
+        var = fread(h,3*nrIdx, 'uint64');
         for i = 1: nrIdx
-          Index(curIdx + i).sectionIdx = fread(h,1, 'uint64');
-          Index(curIdx + i).offset = fread(h,1, 'uint64');
-          Index(curIdx + i).blockL = fread(h,1, 'uint32');
-          Index(curIdx + i).sectionL = fread(h,1, 'uint32');  
+%           Index(curIdx + i).sectionIdx = fread(h,1, 'uint64');
+%           Index(curIdx + i).offset = fread(h,1, 'uint64');
+%           Index(curIdx + i).blockL = fread(h,1, 'uint32');
+%           Index(curIdx + i).sectionL = fread(h,1, 'uint32');  
+          Index(curIdx + i).sectionIdx = var(3*(i-1)+1);
+          Index(curIdx + i).offset = var(3*(i-1)+2);
+          Index(curIdx + i).blockL = mod(var(3*(i-1)+3),2^32);
+          Index(curIdx + i).sectionL = round(var(3*(i-1)+3)/2^32); 
         end
         nextIndexPointer = fread(h,1, 'uint64');
         curIdx = curIdx + i;
@@ -264,8 +279,8 @@ classdef NicoletFile < handle
         'city','state','country','language','height','weight','race','religion',...
         'maritalStatus'};
       
-      ifnoIdx = Tags(find(strcmp({Tags.IDStr},'PATIENTINFOGUID'),1)).index;
-      indexInstance = Index(find([Index.sectionIdx]==ifnoIdx,1));
+      infoIdx = Tags(find(strcmp({Tags.IDStr},'PATIENTINFOGUID'),1)).index;
+      indexInstance = Index(find([Index.sectionIdx]==infoIdx,1));
       fseek(h, indexInstance.offset,'bof');
       guid = fread(h, 16, 'uint8'); %#ok<NASGU>
       lSection = fread(h, 1, 'uint64'); %#ok<NASGU>
@@ -300,8 +315,8 @@ classdef NicoletFile < handle
       obj.patientInfo = info;
       
       %% Get INFOGUID
-      ifnoIdx = Tags(find(strcmp({Tags.IDStr},'InfoGuids'),1)).index;
-      indexInstance = Index(find([Index.sectionIdx]==ifnoIdx,1));
+      infoIdx = Tags(find(strcmp({Tags.IDStr},'InfoGuids'),1)).index;
+      indexInstance = Index(find([Index.sectionIdx]==infoIdx,1));
       fseek(h, indexInstance.offset,'bof');
 
       % Ignoring, is list of GUIDS in file.
@@ -374,85 +389,81 @@ classdef NicoletFile < handle
       end
       
       TSInfo = struct();
-      for iTS = 1: length(indexInstance)
-        
-        % So here the .e format is completely messed up... The index
-        % location that it is pointing to sometimes does not start with the
-        % TS-header but rather some arbitrary section of the TS-info
-        % section. Seems to incorrectly write out a buffer for this section
-        % sometimes (check in hex-edit).
-        %
-        % What seems to work is to search for the TS GUID forward and use
-        % that as the new startIndex. No guarantees that this is correct
-        % though...
-        
-        fseek(h, indexInstance(iTS).offset,'bof');
-        
-        % find guid
-        aux =  fread(h, indexInstance(iTS).sectionL./2, 'uint16');
-        guid = [52427 41585 20829 17808 41398 6108 36108 57966];
-%         display(sprintf('%i',iTS));
-        startGuid = strfind(aux', guid);
-        
-        % Sometimes the block contains multiple headers randomly, so far
-        % the best bet has been to read the block starting on the following
-        % ideces. 
-        if startGuid
-          switch length(startGuid)
-            case 1
-              useIdx = 1;
-            case 2
-              useIdx = 1;
-            otherwise
-              useIdx = 2;
+      %       for iTS = 1: length(indexInstance)
+      
+      % So here the .e format is completely messed up... The index
+      % location that it is pointing to sometimes does not start with the
+      % TS-header but rather some arbitrary section of the TS-info
+      % section. Seems to incorrectly write out a buffer for this section
+      % sometimes (check in hex-edit).
+      %
+      % What seems to work is to search for the TS GUID forward and use
+      % that as the new startIndex. No guarantees that this is correct
+      % though...
+      
+      %         fseek(h, indexInstance(iTS).offset,'bof');
+      fseek(h, indexInstance(1).offset,'bof');
+      
+      % find guid
+      aux =  fread(h, indexInstance(1).sectionL./2, 'uint16');
+      guid = [52427 41585 20829 17808 41398 6108 36108 57966];
+      %         display(sprintf('%i',iTS));
+      startGuid = strfind(aux', guid);
+      
+      if (length(startGuid)==length(indexInstance))
+          
+          for iTS = 1: length(indexInstance)
+              
+              % Sometimes the block contains multiple headers randomly, so far
+              % the best bet has been to read the block starting on the following
+              % indices.
+              guidOffset = indexInstance(iTS).offset + (startGuid(iTS)-1)*2;
+              fseek(h, guidOffset,'bof');
+              
+              
+              TS_struct.guid = fread(h, 16, 'uint8'); % [CBCC 71A2 5D51 9045...] {A271CCCB-515D-4590-B6A1-DC170C8D6EE2}
+              TS_struct.name = fread(h, obj.ITEMNAMESIZE, '*char');
+              fseek(h, 152, 'cof');
+              TSInfo(iTS).notchFreq = fread(h, 1, 'double');
+              fseek(h, 512, 'cof');
+              nrIdx = fread(h,2, 'uint32');  %783
+              
+              for i = 1: nrIdx(2)
+                  TSInfo(iTS).series(i).label = deblank(cast(fread(h, obj.TSLABELSIZE, 'uint16'),'char')');
+                  fZero = find(double(TSInfo(iTS).series(i).label)==0,1);
+                  if fZero; TSInfo(iTS).series(i).label = TSInfo(iTS).series(i).label(1:fZero-1);end
+                  
+                  TSInfo(iTS).series(i).activeSensor = deblank(cast(fread(h, obj.LABELSIZE, 'uint16'),'char')');
+                  fZero = find(double(TSInfo(iTS).series(i).activeSensor)==0,1);
+                  if fZero; TSInfo(iTS).series(i).activeSensor = TSInfo(iTS).series(i).activeSensor(1:fZero-1);end
+                  
+                  TSInfo(iTS).series(i).refSensor = deblank(cast(fread(h, obj.LABELSIZE, 'uint16'),'char')');
+                  fZero = find(double(TSInfo(iTS).series(i).refSensor)==0,1);
+                  if fZero; TSInfo(iTS).series(i).refSensor = TSInfo(iTS).series(i).refSensor(1:fZero-1);end
+                  
+                  
+                  TSInfo(iTS).series(i).dLowCut = fread(h,1,'double');
+                  TSInfo(iTS).series(i).dHighCut = fread(h,1,'double');
+                  TSInfo(iTS).series(i).dSamplingRate = fread(h,1,'double');
+                  TSInfo(iTS).series(i).dResolution = fread(h,1,'double');
+                  TSInfo(iTS).series(i).bMark = logical(fread(h, 1 ,'uint32'));
+                  TSInfo(iTS).series(i).bNotch = logical(fread(h, 1 ,'uint32'));
+                  
+                  tmp3 = find(strcmp(num2str(i-1),{obj.sections.tag}),1);
+                  if ~isempty(tmp3)
+                      TSInfo(iTS).series(i).ID = obj.sections(tmp3).index;
+                  end
+                  
+                  fseek(h, 256, 'cof');
+              end
+              
+              
           end
-          guidOffset = indexInstance(iTS).offset + (startGuid(useIdx)-1)*2;
-        else
+      else
           error('Can''t find TSInfo header in TSInfo block, blame Nicolet');
-        end
-        fseek(h, guidOffset,'bof');
-        
-
-        TS_struct.guid = fread(h, 16, 'uint8'); % [CBCC 71A2 5D51 9045...] {A271CCCB-515D-4590-B6A1-DC170C8D6EE2}
-        TS_struct.name = fread(h, obj.ITEMNAMESIZE, '*char');
-        fseek(h, 152, 'cof');
-        TSInfo(iTS).notchFreq = fread(h, 1, 'double');
-        fseek(h, 512, 'cof');
-        nrIdx = fread(h,2, 'uint32');  %783
-
-        for i = 1: nrIdx(2)
-          TSInfo(iTS).series(i).label = deblank(cast(fread(h, obj.TSLABELSIZE, 'uint16'),'char')');  
-          fZero = find(double(TSInfo(iTS).series(i).label)==0,1);
-          if fZero; TSInfo(iTS).series(i).label = TSInfo(iTS).series(i).label(1:fZero-1);end
-
-          TSInfo(iTS).series(i).activeSensor = deblank(cast(fread(h, obj.LABELSIZE, 'uint16'),'char')');  
-          fZero = find(double(TSInfo(iTS).series(i).activeSensor)==0,1);
-          if fZero; TSInfo(iTS).series(i).activeSensor = TSInfo(iTS).series(i).activeSensor(1:fZero-1);end
-
-          TSInfo(iTS).series(i).refSensor = deblank(cast(fread(h, obj.LABELSIZE, 'uint16'),'char')');  
-          fZero = find(double(TSInfo(iTS).series(i).refSensor)==0,1);
-          if fZero; TSInfo(iTS).series(i).refSensor = TSInfo(iTS).series(i).refSensor(1:fZero-1);end
-
-
-          TSInfo(iTS).series(i).dLowCut = fread(h,1,'double');
-          TSInfo(iTS).series(i).dHighCut = fread(h,1,'double');
-          TSInfo(iTS).series(i).dSamplingRate = fread(h,1,'double');
-          TSInfo(iTS).series(i).dResolution = fread(h,1,'double');
-          TSInfo(iTS).series(i).bMark = logical(fread(h, 1 ,'uint32')); 
-          TSInfo(iTS).series(i).bNotch = logical(fread(h, 1 ,'uint32')); 
-
-          tmp3 = find(strcmp(num2str(i-1),{obj.sections.tag}),1);
-          if ~isempty(tmp3)
-            TSInfo(iTS).series(i).ID = obj.sections(tmp3).index;
-          end
-
-          fseek(h, 256, 'cof');
-        end  
-       
-        
       end
-       obj.tsInfo = TSInfo;
-
+      obj.tsInfo = TSInfo;
+      
       % -- -- -- 
 
       %% Get Segment Start Times
@@ -486,6 +497,106 @@ classdef NicoletFile < handle
         
       end
 
+      %% Get events  - Andrei Barborica, Dec 2015
+      % Find sequence of events, that are stored in the section tagged 'Events'
+      idxSection = find(strcmp('Events',{obj.sections.tag}));
+      indexIdx = find([obj.index.sectionIdx] == obj.sections(idxSection).index);
+      offset = obj.index(indexIdx).offset;
+
+      ePktLen = 272;    % Event packet length, see EVENTPACKET definition
+      eMrkLen = 240;    % Event marker length, see EVENTMARKER definition 
+      evtPktGUID = hex2dec({'80', 'F6', '99', 'B7', 'A4', '72', 'D3', '11', '93', 'D3', '00', '50', '04', '00', 'C1', '48'}); % GUID for event packet header
+      HCEVENT_ANNOTATION = '{A5A95612-A7F8-11CF-831A-0800091B5BDA}';
+      HCEVENT_SEIZURE    =  '{A5A95646-A7F8-11CF-831A-0800091B5BDA}';
+      DAYSECS = 86400.0;  % From nrvdate.h
+      
+      
+      fseek(h,offset,'bof');
+      pktGUID = fread(h,16,'uint8');
+      pktLen  = fread(h,1,'uint64');
+      obj.eventMarkers = struct();
+      i = 0;    % Event counter
+      while (pktGUID == evtPktGUID)
+          i = i + 1;
+          % Please refer to EVENTMARKER structure in the Nervus file documentation
+          fseek(h,8,'cof'); % Skip eventID, not used
+          evtDate           = fread(h,1,'double');
+          evtDateFraction   = fread(h,1,'double');
+          evtPOSIXTime = evtDate*DAYSECS + evtDateFraction - 2209161600;% 2208988800; %8 
+          obj.eventMarkers(i).dateStr = datestr(evtPOSIXTime/DAYSECS + datenum(1970,1,1),'dd-mmmm-yyyy HH:MM:SS.FFF'); % Save fractions of seconds, as well
+          obj.eventMarkers(i).duration  = fread(h,1,'double');
+          fseek(h,48,'cof');
+          evtUser                       = fread(h,12,'uint16');
+          obj.eventMarkers(i).user      = deblank(char(evtUser).');
+          evtTextLen                    = fread(h,1,'uint64');
+          evtGUID                       = fread(h,16,'uint8');
+          obj.eventMarkers(i).GUID      = sprintf('{%.2X%.2X%.2X%.2X-%.2X%.2X-%.2X%.2X-%.2X%.2X-%.2X%.2X%.2X%.2X%.2X%.2X}',evtGUID([4 3 2 1 6 5 8 7 9:16]));
+          fseek(h,16,'cof');    % Skip Reserved4 array
+          evtLabel                      = fread(h,32,'uint16'); % LABELSIZE = 32;
+          evtLabel                      = deblank(char(evtLabel).');    % Not used
+          
+          %disp(sprintf('Offset: %s, TypeGUID:%s, User:%s, Label:%s',dec2hex(offset),evtGUID,evtUser,evtLabel));
+          
+          % Only a subset of all event types are dealt with
+          switch obj.eventMarkers(i).GUID
+              case HCEVENT_SEIZURE
+                  obj.eventMarkers(i).IDStr = 'Seizure';
+                  %disp(' Seizure event');
+              case HCEVENT_ANNOTATION
+                  obj.eventMarkers(i).IDStr = 'Annotation';
+                  fseek(h,32,'cof');    % Skip Reserved5 array
+                  evtAnnotation = fread(h,evtTextLen,'uint16');
+                  obj.eventMarkers(i).annotation = deblank(char(evtAnnotation).');
+                  %disp(sprintf(' Annotation:%s',evtAnnotation));
+              otherwise
+                  obj.eventMarkers(i).IDStr = 'UNKNOWN';
+          end
+          
+          % Next packet
+          offset = offset + pktLen;
+          fseek(h,offset,'bof');
+          pktGUID = fread(h,16,'uint8');
+          pktLen  = fread(h,1,'uint64');
+      end
+      
+      %% Get montage  - Andrei Barborica, Dec 2015
+      % Derivation (montage)
+      mtgIdx  = Tags(find(strcmp({Tags.IDStr},'DERIVATIONGUID'),1)).index;
+      indexIdx      = find([obj.index.sectionIdx]==mtgIdx,1);
+      fseek(h,obj.index(indexIdx(1)).offset + 40,'bof');    % Beginning of current montage name
+      mtgName       = deblank(char(fread(h,32,'uint16')).');
+      fseek(h,640,'cof');                             % Number of traces in the montage
+      numDerivations = fread(h,1,'uint32');
+      numDerivations2 = fread(h,1,'uint32');
+      
+      obj.montage = struct();
+      for i = 1:numDerivations
+          obj.montage(i).derivationName = deblank(char(fread(h,64,'uint16')).');
+          obj.montage(i).signalName1    = deblank(char(fread(h,32,'uint16')).');
+          obj.montage(i).signalName2    = deblank(char(fread(h,32,'uint16')).');
+          fseek(h,264,'cof');         % Skip additional info
+      end
+      
+      % Display properties
+      dispIdx = Tags(find(strcmp({Tags.IDStr},'DISPLAYGUID'),1)).index;
+      indexIdx  = find([obj.index.sectionIdx]==dispIdx,1);
+      fseek(h,obj.index(indexIdx(1)).offset + 40,'bof');    % Beginning of current montage name
+      displayName          = deblank(char(fread(h,32,'uint16')).');
+      fseek(h,640,'cof');                             % Number of traces in the montage
+      numTraces = fread(h,1,'uint32');
+      numTraces2 = fread(h,1,'uint32');
+      
+      if (numTraces == numDerivations)
+          for i = 1:numTraces
+              fseek(h,32,'cof');
+              obj.montage(i).color = fread(h,1,'uint32'); % Use typecast(uint32(montage(i).color),'uint8') to convert to RGB array
+              fseek(h,136-4,'cof');
+          end
+      else
+          disp('Could not match montage derivations with display color table');
+      end
+      
+      
       % Close File
       fclose(h);
 
@@ -532,7 +643,8 @@ classdef NicoletFile < handle
         sectionIdx(i) = obj.sections(tmp).index;
       end
       
-      % Iterate over all requested channels and poplutate array. 
+      % Iterate over all requested channels and populate array. 
+      out = zeros(range(2) - range(1) + 1, lChIdx); 
       for i = 1 : lChIdx
         
         % Get sampling rate for current channel
@@ -574,7 +686,6 @@ classdef NicoletFile < handle
         useSectionL = sectionLengths(firstSection: lastSection) ;
        
         % First Partial Segment
-        out = zeros(range(2) - range(1) + 1, lChIdx); 
         curIdx = 1;
         curSec = obj.index(useSections(1));
         fseek(h, curSec.offset,'bof');
@@ -609,6 +720,199 @@ classdef NicoletFile < handle
       % Close the .e file.
       fclose(h);
       
+    end
+    
+     function out = getdataQ(obj, segment, range, chIdx)
+      % GETDATAQ  Returns data from Nicolet file. This is a "QUICK" version of getdata,
+      % that uses more memory but operates faster on large datasets by reading
+      % a single block of data from disk that contains all data of interest.
+      %
+      %   OUT = GETDATAQ(OBJ, SEGMENT, RANGE, CHIDX) returns data in an nxm array of
+      %   doubles where n is the number of datapoints and m is the number
+      %   of channels. RANGE is a 1x2 array with the [StartIndex EndIndex]
+      %   and CHIDX is a vector of channel indeces.
+      %
+      % Andrei Barborica, Dec 2015
+      %
+     
+      % Assert range is 1x2 vector
+      assert(length(range) == 2, 'Range is [firstIndex lastIndex]');
+      assert(length(segment) == 1, 'Segment must be single value.');
+
+      % Get cumulative sum segments.
+      cSumSegments = [0 cumsum([obj.segments.duration])];
+      
+      % Reopen .e file.
+      h = fopen(obj.fileName,'r','ieee-le');
+      
+      % Find sectionID for channels
+      lChIdx = length(chIdx);
+      sectionIdx = zeros(lChIdx,1);
+      for i = 1:lChIdx
+        tmp = find(strcmp(num2str(chIdx(i)-1),{obj.sections.tag}),1);
+        sectionIdx(i) = obj.sections(tmp).index;
+      end
+      
+      usedIndexEntries = zeros(size([obj.index.offset]));
+
+      % Iterate over all requested channels and populate array. 
+      out = zeros(range(2) - range(1) + 1, lChIdx); 
+      for i = 1 : lChIdx
+        
+        % Get sampling rate for current channel
+        curSF = obj.segments(segment).samplingRate(chIdx(i));
+        mult = obj.segments(segment).scale(chIdx(i));
+        
+        % Find all sections      
+        allSectionIdx = obj.allIndexIDs == sectionIdx(i);
+        allSections = find(allSectionIdx);
+                
+        % Find relevant sections
+        sectionLengths = [obj.index(allSections).sectionL]./2;
+        cSectionLengths = [0 cumsum(sectionLengths)];
+        
+        skipValues = cSumSegments(segment) * curSF;
+        firstSectionForSegment = find(cSectionLengths > skipValues, 1) - 1 ;
+        lastSectionForSegment = firstSectionForSegment + ...
+          find(cSectionLengths > curSF*obj.segments(segment).duration,1) - 2 ;
+
+        if isempty(lastSectionForSegment)
+          lastSectionForSegment = length(cSectionLengths);
+        end
+        
+        offsetSectionLengths = cSectionLengths - cSectionLengths(firstSectionForSegment);
+        
+        firstSection = find(offsetSectionLengths < range(1) ,1,'last');
+        lastSection = find(offsetSectionLengths >= range(2),1)-1;
+        
+        if isempty(lastSection)
+          lastSection = length(offsetSectionLengths);
+        end
+        
+        if lastSection > lastSectionForSegment 
+          error('Index out of range for current section: %i > %i, on channel: %i', ... 
+            range(2), cSectionLengths(lastSectionForSegment+1), chIdx(i));
+        end
+        
+        useSections = allSections(firstSection: lastSection) ;
+        useSectionL = sectionLengths(firstSection: lastSection) ;
+       
+        % First Partial Segment
+        usedIndexEntries(useSections(1)) = 1;
+        
+        if length(useSections) > 1
+          % Full Segments
+          for j = 2: (length(useSections)-1)
+            usedIndexEntries(useSections(j)) = 1;
+          end
+          
+          % Final Partial Segment
+          usedIndexEntries(useSections(end)) = 1;
+        end
+        
+      end
+      
+      % Read a big chunk of the file, containing data of interest.
+      ix = find(usedIndexEntries);
+      fseek(h, obj.index(ix(1)).offset,'bof');
+      dsize =  obj.index(ix(end)).offset - obj.index(ix(1)).offset + obj.index(ix(end)).sectionL;
+      tmp = fread(h,dsize/2,'int16').';
+
+      % Close the .e file.
+      fclose(h);
+      
+      baseOffset = obj.index(ix(1)).offset;
+      
+      % Extract specified channels
+      for i = 1 : lChIdx
+        
+        % Get sampling rate for current channel
+        curSF = obj.segments(segment).samplingRate(chIdx(i));
+        mult = obj.segments(segment).scale(chIdx(i));
+        
+        % Find all sections      
+        allSectionIdx = obj.allIndexIDs == sectionIdx(i);
+        allSections = find(allSectionIdx);
+                
+        % Find relevant sections
+        sectionLengths = [obj.index(allSections).sectionL]./2;
+        cSectionLengths = [0 cumsum(sectionLengths)];
+        
+        skipValues = cSumSegments(segment) * curSF;
+        firstSectionForSegment = find(cSectionLengths > skipValues, 1) - 1 ;
+        lastSectionForSegment = firstSectionForSegment + ...
+          find(cSectionLengths > curSF*obj.segments(segment).duration,1) - 2 ;
+
+        if isempty(lastSectionForSegment)
+          lastSectionForSegment = length(cSectionLengths);
+        end
+        
+        offsetSectionLengths = cSectionLengths - cSectionLengths(firstSectionForSegment);
+        
+        firstSection = find(offsetSectionLengths < range(1) ,1,'last');
+        lastSection = find(offsetSectionLengths >= range(2),1)-1;
+        
+        if isempty(lastSection)
+          lastSection = length(offsetSectionLengths);
+        end
+        
+        if lastSection > lastSectionForSegment 
+          error('Index out of range for current section: %i > %i, on channel: %i', ... 
+            range(2), cSectionLengths(lastSectionForSegment+1), chIdx(i));
+        end
+        
+        useSections = allSections(firstSection: lastSection) ;
+        useSectionL = sectionLengths(firstSection: lastSection) ;
+       
+        % First Partial Segment
+        curIdx = 1;
+        curSec = obj.index(useSections(1));
+        %fseek(h, curSec.offset,'bof');
+        
+        firstOffset = range(1) - offsetSectionLengths(firstSection);
+        lastOffset = min([range(2) useSectionL(1)]);
+        lsec = lastOffset-firstOffset + 1;
+        
+        out(1 : lsec,i) = tmp( (curSec.offset - baseOffset)/2 + (firstOffset-1) + (1:lsec) ) * mult;
+        curIdx = curIdx +  lsec;
+        
+        if length(useSections) > 1
+          % Full Segments
+          for j = 2: (length(useSections)-1)
+            curSec = obj.index(useSections(j));
+            out(curIdx : (curIdx + useSectionL(j) - 1),i) = ...
+                tmp( (curSec.offset - baseOffset)/2 + (1:useSectionL(j)) ) * mult;
+            curIdx = curIdx +  useSectionL(j);
+          end
+
+          % Final Partial Segment
+          curSec = obj.index(useSections(end));
+          out(curIdx : end,i) = tmp( (curSec.offset - baseOffset)/2 + (1:(length(out)-curIdx + 1)) ) * mult; % length(out) ??????
+        end
+        
+      end
+    end
+       
+    function labels = getlabels(obj,str)
+        % Returns annotations containing specified string
+        %
+        % Cristian Donos, Dec 2015
+        %
+        labels=[]; counter = 1;
+        for i = 1:length(obj.eventMarkers)
+            if strfind(lower(obj.eventMarkers(i).annotation),lower(str))
+            labels{counter,1} = obj.eventMarkers(i).annotation;  % annotation string
+            labels{counter,2} = i;  % annotation index in obj.eventMarkers
+            % identify segment
+            time_vector = [];
+            for j = 1:length(obj.segments)
+                time_vector = [time_vector etime(datevec(obj.eventMarkers(i).dateStr),datevec(obj.segments(j).dateStr))];
+            end
+            labels{counter,3}= find(time_vector==min(time_vector(time_vector>0)));  % annotation part of this segment 
+            labels{counter,4}= min(time_vector(time_vector>0));  % annotation offset in seconds, relative to its segment start 
+            counter = counter+1;
+            end
+        end
     end
   end
   
