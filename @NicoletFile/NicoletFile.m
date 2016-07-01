@@ -46,6 +46,7 @@ classdef NicoletFile < handle
 
   % Joost Wagenaar, Jan 2015
   % Cristian Donos, Dec 2015
+  % Jan Brogger, Jun 2016
   
   properties
     fileName
