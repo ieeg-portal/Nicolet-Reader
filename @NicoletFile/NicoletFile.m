@@ -79,7 +79,7 @@ classdef NicoletFile < handle
     function obj = NicoletFile(filename)
       h = fopen(filename,'r','ieee-le');
       
-      [folder, ~, ext] = fileparts(filename);
+      [folder, name, ext] = fileparts(filename);
       assert(strcmp(ext,'.e'), 'File extention must be .e');
       if isempty(folder)
         filename = fullfile(pwd,filename);
@@ -269,6 +269,99 @@ classdef NicoletFile < handle
       fprintf('done\n');
       obj.index = Index; 
       obj.allIndexIDs = [obj.index.sectionIdx];
+    
+    %---READ DYNAMIC PACKETS---%
+    dynamicPackets = struct();
+    indexIdx = Tags(find(strcmp({Tags.IDStr},'InfoChangeStream'),1)).index;
+    offset = Index(indexIdx).offset;
+    nrDynamicPackets = Index(indexIdx).sectionL / 48;
+    fseek(h, offset, 'bof');
+    
+    %Read first only the dynamic packets structure without actual data
+    for i = 1: nrDynamicPackets        
+        dynamicPackets(i).offset = offset+i*48;
+        guidmixed = fread(h,16, 'uint8')';        
+        guidnonmixed = [guidmixed(04), guidmixed(03), guidmixed(02), guidmixed(01), ...
+                        guidmixed(06), guidmixed(05), guidmixed(08), guidmixed(07), ...
+                        guidmixed(09), guidmixed(10), guidmixed(11), guidmixed(12), ...
+                        guidmixed(13), guidmixed(14), guidmixed(15), guidmixed(16)];        
+        dynamicPackets(i).guid = num2str(guidnonmixed, '%02X');
+        dynamicPackets(i).guidAsStr = sprintf('{%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X}', guidnonmixed);
+        dynamicPackets(i).date = datenum(1899,12,31) + fread(h,1,'double');
+        dynamicPackets(i).datefrac = fread(h,1,'double');        
+        dynamicPackets(i).internalOffsetStart = fread(h,1, 'uint64')';
+        dynamicPackets(i).packetSize = fread(h,1, 'uint64')';        
+        dynamicPackets(i).data = zeros(0, 1,'uint8');
+        
+        switch dynamicPackets(i).guid
+            case 'BF7C95EF6C3B4E709E11779BFFF58EA7'                  
+               dynamicPackets(i).IDStr = 'CHANNELGUID';
+            case '8A19AA48BEA040D5B89F667FC578D635'
+                dynamicPackets(i).IDStr = 'DERIVATIONGUID';
+            case 'F824D60C995E4D949578893C755ECB99'                  
+                dynamicPackets(i).IDStr = 'FILTERGUID';
+            case '0295036135BB4A229F0BC78AAA5DB094'               
+                dynamicPackets(i).IDStr = 'DISPLAYGUID';
+            case '782B34E88E514BB997013227BB882A23'               
+                dynamicPackets(i).IDStr = 'ACCINFOGUID';
+            case 'A271CCCB515D4590B6A1DC170C8D6EE2'               
+                dynamicPackets(i).IDStr = 'TSGUID';
+            case 'D01B34A09DBD11D393D300500400C148'
+                dynamicPackets(i).IDStr = 'AUDIOINFOGUID';
+            otherwise
+                dynamicPackets(i).IDStr = 'UNKNOWN';
+        end
+    end
+    
+    %Then read the actual data from the pointers above
+    for i = 1: nrDynamicPackets
+        %Look up the GUID of this dynamic packet in the Tags
+        % to find the section index
+                        
+        infoIdx = Tags(find(strcmp({Tags.tag},dynamicPackets(i).guidAsStr),1)).index;
+                
+        %Matching index segments
+        indexInstances = Index([Index.sectionIdx] == infoIdx);
+        
+        %Then, treat all these sections as one contiguous memory block
+        % and grab this packet across these instances        
+                
+        internalOffset = 0;
+        remainingDataToRead = dynamicPackets(i).packetSize;
+        %disp(['Target packet ' dynamicPackets(i).IDStr ' : ' num2str(dynamicPackets(i).internalOffsetStart) ' to ' num2str(dynamicPackets(i).internalOffsetStart+dynamicPackets(i).packetSize) ' target read length ' num2str(remainingDataToRead)]);
+        currentTargetStart = dynamicPackets(i).internalOffsetStart;
+        for j = 1: size(indexInstances,2)
+            currentInstance = indexInstances(j);            
+            
+            %hitInThisSegment = '';
+            if (internalOffset <= currentTargetStart) && (internalOffset+currentInstance.sectionL) >= currentTargetStart
+                
+                startAt = currentTargetStart;
+                stopAt =  min(startAt+remainingDataToRead, internalOffset+currentInstance.sectionL);
+                readLength = stopAt-startAt;
+                
+                filePosStart = currentInstance.offset+startAt-internalOffset;
+                fseek(h,filePosStart, 'bof');                
+                dataPart = fread(h,readLength,'uint8=>uint8');
+                dynamicPackets(i).data = cat(1, dynamicPackets(i).data, dataPart);
+                
+                %hitInThisSegment = ['HIT at  ' num2str(startAt) ' to ' num2str(stopAt)];
+                %if (readLength < remainingDataToRead)
+                %    hitInThisSegment = [hitInThisSegment ' (partial ' num2str(readLength) ' )'];                    
+                %else
+                %    hitInThisSegment = [hitInThisSegment ' (finished - this segment contributed ' num2str(readLength) ' )'];
+                %end
+                %hitInThisSegment = [hitInThisSegment ' abs file pos ' num2str(filePosStart) ' - ' num2str(filePosStart+readLength)];
+                
+                remainingDataToRead = remainingDataToRead-readLength;
+                currentTargetStart = currentTargetStart + readLength;
+                
+            end            
+            %disp(['    Index ' num2str(j) ' Offset: ' num2str(internalOffset) ' to ' num2str(internalOffset+currentInstance.sectionL) ' ' num2str(hitInThisSegment)]);
+            
+            internalOffset = internalOffset + currentInstance.sectionL;
+        end
+    end
       
       %% Get PatientGUID
       info = struct();
@@ -379,90 +472,49 @@ classdef NicoletFile < handle
       end
       
       %% Get TS info (TSGUID):(One per segment, last used if no new for segment)
-      TS_struct = struct();
-      sensorIdx = Tags(find(strcmp({Tags.IDStr},'TSGUID'),1)).index;
-      indexInstance = Index([Index.sectionIdx]==sensorIdx);
-      
-      if length(indexInstance) > 1
-        warning(['Multiple TSinfo packets detected; using first instance '...
-          ' ac for all segments. See documentation for info.']);
+      %% To simplify things, we only read the first TSINFO.
+	  tsPackets = dynamicPackets(strcmp({dynamicPackets.IDStr},'TSGUID'));
+
+      if length(tsPackets) > 1
+          warning(['Multiple TSinfo packets detected; using first instance ' ...
+            ' ac for all segments. See documentation for info.']);
+      elseif isempty(tsPackets)
+          warning(['No TSINFO found']);
+      else    
+          tsPacket = tsPackets(1);
+
+          obj.tsInfo = struct();                  
+          elems = typecast(tsPacket.data(753:756),'uint32');        
+          alloc = typecast(tsPacket.data(757:760),'uint32');        
+
+          offset = 761;
+          for i = 1:elems
+              internalOffset = 0;
+              obj.tsInfo(i).label = deblank(char(typecast(tsPacket.data(offset:(offset+obj.TSLABELSIZE-1))','uint16')));
+              internalOffset = internalOffset + obj.TSLABELSIZE*2;
+              obj.tsInfo(i).activeSensor = deblank(char(typecast(tsPacket.data(offset+internalOffset:(offset+internalOffset-1+obj.LABELSIZE))','uint16')));
+              internalOffset = internalOffset + obj.TSLABELSIZE;
+              obj.tsInfo(i).refSensor = deblank(char(typecast(tsPacket.data(offset+internalOffset:(offset+internalOffset-1+8))','uint16')));
+              internalOffset = internalOffset + 8;
+              internalOffset = internalOffset + 56;
+              obj.tsInfo(i).dLowCut = typecast(tsPacket.data(offset+internalOffset:(offset+internalOffset-1+8))','double');
+              internalOffset = internalOffset + 8;
+              obj.tsInfo(i).dHighCut = typecast(tsPacket.data(offset+internalOffset:(offset+internalOffset-1+8))','double');
+              internalOffset = internalOffset + 8;
+              obj.tsInfo(i).dSamplingRate = typecast(tsPacket.data(offset+internalOffset:(offset+internalOffset-1+8))','double');
+              internalOffset = internalOffset + 8;
+              obj.tsInfo(i).dResolution = typecast(tsPacket.data(offset+internalOffset:(offset+internalOffset-1+8))','double');
+              internalOffset = internalOffset + 8;
+              obj.tsInfo(i).bMark = typecast(tsPacket.data(offset+internalOffset:(offset+internalOffset-1+2))','uint16');
+              internalOffset = internalOffset + 2;
+              obj.tsInfo(i).bNotch = typecast(tsPacket.data(offset+internalOffset:(offset+internalOffset-1+2))','uint16');
+              internalOffset = internalOffset + 2;
+              obj.tsInfo(i).dEegOffset = typecast(tsPacket.data(offset+internalOffset:(offset+internalOffset-1+8))','double');
+              offset = offset + 552;
+              %disp([num2str(i) ' : ' TSInfo(i).label ' : ' TSInfo(i).activeSensor ' : ' TSInfo(i).refSensor ' : ' num2str(TSInfo(i).samplingRate)]);
+            
+          end        
       end
-      
-      TSInfo = struct();
-      %       for iTS = 1: length(indexInstance)
-      
-      % So here the .e format is completely messed up... The index
-      % location that it is pointing to sometimes does not start with the
-      % TS-header but rather some arbitrary section of the TS-info
-      % section. Seems to incorrectly write out a buffer for this section
-      % sometimes (check in hex-edit).
-      %
-      % What seems to work is to search for the TS GUID forward and use
-      % that as the new startIndex. No guarantees that this is correct
-      % though...
-      
-      %         fseek(h, indexInstance(iTS).offset,'bof');
-      fseek(h, indexInstance(1).offset,'bof');
-      
-      % find guid
-      aux =  fread(h, indexInstance(1).sectionL./2, 'uint16');
-      guid = [52427 41585 20829 17808 41398 6108 36108 57966];
-      %         display(sprintf('%i',iTS));
-      startGuid = strfind(aux', guid);
-      
-      if (length(startGuid)==length(indexInstance))
-          
-          for iTS = 1: length(indexInstance)
-              
-              % Sometimes the block contains multiple headers randomly, so far
-              % the best bet has been to read the block starting on the following
-              % indices.
-              guidOffset = indexInstance(iTS).offset + (startGuid(iTS)-1)*2;
-              fseek(h, guidOffset,'bof');
-              
-              
-              TS_struct.guid = fread(h, 16, 'uint8'); % [CBCC 71A2 5D51 9045...] {A271CCCB-515D-4590-B6A1-DC170C8D6EE2}
-              TS_struct.name = fread(h, obj.ITEMNAMESIZE, '*char');
-              fseek(h, 152, 'cof');
-              TSInfo(iTS).notchFreq = fread(h, 1, 'double');
-              fseek(h, 512, 'cof');
-              nrIdx = fread(h,2, 'uint32');  %783
-              
-              for i = 1: nrIdx(2)
-                  TSInfo(iTS).series(i).label = deblank(cast(fread(h, obj.TSLABELSIZE, 'uint16'),'char')');
-                  fZero = find(double(TSInfo(iTS).series(i).label)==0,1);
-                  if fZero; TSInfo(iTS).series(i).label = TSInfo(iTS).series(i).label(1:fZero-1);end
-                  
-                  TSInfo(iTS).series(i).activeSensor = deblank(cast(fread(h, obj.LABELSIZE, 'uint16'),'char')');
-                  fZero = find(double(TSInfo(iTS).series(i).activeSensor)==0,1);
-                  if fZero; TSInfo(iTS).series(i).activeSensor = TSInfo(iTS).series(i).activeSensor(1:fZero-1);end
-                  
-                  TSInfo(iTS).series(i).refSensor = deblank(cast(fread(h, obj.LABELSIZE, 'uint16'),'char')');
-                  fZero = find(double(TSInfo(iTS).series(i).refSensor)==0,1);
-                  if fZero; TSInfo(iTS).series(i).refSensor = TSInfo(iTS).series(i).refSensor(1:fZero-1);end
-                  
-                  
-                  TSInfo(iTS).series(i).dLowCut = fread(h,1,'double');
-                  TSInfo(iTS).series(i).dHighCut = fread(h,1,'double');
-                  TSInfo(iTS).series(i).dSamplingRate = fread(h,1,'double');
-                  TSInfo(iTS).series(i).dResolution = fread(h,1,'double');
-                  TSInfo(iTS).series(i).bMark = logical(fread(h, 1 ,'uint32'));
-                  TSInfo(iTS).series(i).bNotch = logical(fread(h, 1 ,'uint32'));
-                  
-                  tmp3 = find(strcmp(num2str(i-1),{obj.sections.tag}),1);
-                  if ~isempty(tmp3)
-                      TSInfo(iTS).series(i).ID = obj.sections(tmp3).index;
-                  end
-                  
-                  fseek(h, 256, 'cof');
-              end
-              
-              
-          end
-      else
-          error('Can''t find TSInfo header in TSInfo block, blame Nicolet');
-      end
-      obj.tsInfo = TSInfo;
       
       % -- -- -- 
 
@@ -490,16 +542,16 @@ classdef NicoletFile < handle
       for iSeg = 1:length(obj.segments)
        
         % Add Channel Names to segments
-        obj.segments(iSeg).chName = {obj.tsInfo(obj.useTSinfoIdx).series.label};
-        obj.segments(iSeg).refName = {obj.tsInfo(obj.useTSinfoIdx).series.refSensor};
-        obj.segments(iSeg).samplingRate = [obj.tsInfo(obj.useTSinfoIdx).series.dSamplingRate];
-        obj.segments(iSeg).scale = [obj.tsInfo(obj.useTSinfoIdx).series.dResolution];
+        obj.segments(iSeg).chName = {obj.tsInfo.label};
+        obj.segments(iSeg).refName = {obj.tsInfo.refSensor};
+        obj.segments(iSeg).samplingRate = [obj.tsInfo.dSamplingRate];
+        obj.segments(iSeg).scale = [obj.tsInfo.dResolution];
         
       end
 
       %% Get events  - Andrei Barborica, Dec 2015
       % Find sequence of events, that are stored in the section tagged 'Events'
-      idxSection = find(strcmp('Events',{obj.sections.tag}));
+      idxSection = find(strcmp('Events',{Tags.tag}));
       indexIdx = find([obj.index.sectionIdx] == obj.sections(idxSection).index);
       offset = obj.index(indexIdx).offset;
 
