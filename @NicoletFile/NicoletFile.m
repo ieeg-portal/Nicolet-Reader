@@ -526,8 +526,10 @@ classdef NicoletFile < handle
       nrSegments = segmentInstance.sectionL/152;
       fseek(h, segmentInstance.offset,'bof');
       obj.segments = struct();
-      for i = 1: nrSegments        
-        unix_time = (fread(h,1, 'double')*(3600*24)) - 2209161600;% 2208988800; %8 
+      for i = 1: nrSegments
+        dateOLE = fread(h,1, 'double');
+        obj.segments(i).dateOLE = dateOLE;
+        unix_time = (dateOLE*(3600*24)) - 2209161600;% 2208988800; %8        
         obj.segments(i).dateStr = datestr(unix_time/86400 + datenum(1970,1,1));
         datev = datevec( obj.segments(i).dateStr );
         obj.segments(i).startDate = datev(1:3);
@@ -560,6 +562,14 @@ classdef NicoletFile < handle
       evtPktGUID = hex2dec({'80', 'F6', '99', 'B7', 'A4', '72', 'D3', '11', '93', 'D3', '00', '50', '04', '00', 'C1', '48'}); % GUID for event packet header
       HCEVENT_ANNOTATION = '{A5A95612-A7F8-11CF-831A-0800091B5BDA}';
       HCEVENT_SEIZURE    =  '{A5A95646-A7F8-11CF-831A-0800091B5BDA}';
+      HCEVENT_FORMATCHANGE      =  '{08784382-C765-11D3-90CE-00104B6F4F70}';
+      HCEVENT_PHOTIC            =  '{6FF394DA-D1B8-46DA-B78F-866C67CF02AF}';
+      HCEVENT_POSTHYPERVENT     =  '{481DFC97-013C-4BC5-A203-871B0375A519}';
+      HCEVENT_REVIEWPROGRESS    =  '{725798BF-CD1C-4909-B793-6C7864C27AB7}';
+      HCEVENT_EXAMSTART         =  '{96315D79-5C24-4A65-B334-E31A95088D55}';
+      HCEVENT_HYPERVENTILATION  =  '{A5A95608-A7F8-11CF-831A-0800091B5BDA}';                            
+      HCEVENT_IMPEDANCE         =  '{A5A95617-A7F8-11CF-831A-0800091B5BDA}';
+
       DAYSECS = 86400.0;  % From nrvdate.h
       
       
@@ -574,6 +584,8 @@ classdef NicoletFile < handle
           fseek(h,8,'cof'); % Skip eventID, not used
           evtDate           = fread(h,1,'double');
           evtDateFraction   = fread(h,1,'double');
+          obj.eventMarkers(i).dateOLE = evtDate;
+          obj.eventMarkers(i).dateFraction = evtDateFraction;
           evtPOSIXTime = evtDate*DAYSECS + evtDateFraction - 2209161600;% 2208988800; %8 
           obj.eventMarkers(i).dateStr = datestr(evtPOSIXTime/DAYSECS + datenum(1970,1,1),'dd-mmmm-yyyy HH:MM:SS.FFF'); % Save fractions of seconds, as well
           obj.eventMarkers(i).duration  = fread(h,1,'double');
@@ -586,6 +598,7 @@ classdef NicoletFile < handle
           fseek(h,16,'cof');    % Skip Reserved4 array
           evtLabel                      = fread(h,32,'uint16'); % LABELSIZE = 32;
           evtLabel                      = deblank(char(evtLabel).');    % Not used
+          eventMarkers(i).label         = evtLabel;
           
           %disp(sprintf('Offset: %s, TypeGUID:%s, User:%s, Label:%s',dec2hex(offset),evtGUID,evtUser,evtLabel));
           
@@ -600,6 +613,20 @@ classdef NicoletFile < handle
                   evtAnnotation = fread(h,evtTextLen,'uint16');
                   obj.eventMarkers(i).annotation = deblank(char(evtAnnotation).');
                   %disp(sprintf(' Annotation:%s',evtAnnotation));
+              case HCEVENT_FORMATCHANGE
+                  obj.eventMarkers(i).IDStr = 'Format change';
+              case HCEVENT_PHOTIC
+                  obj.eventMarkers(i).IDStr = 'Photic';
+              case HCEVENT_POSTHYPERVENT
+                  obj.eventMarkers(i).IDStr = 'Posthyperventilation';
+              case HCEVENT_REVIEWPROGRESS 
+                  obj.eventMarkers(i).IDStr = 'Review progress';
+              case HCEVENT_EXAMSTART
+                  obj.eventMarkers(i).IDStr = 'Exam start';
+              case HCEVENT_HYPERVENTILATION
+                  obj.eventMarkers(i).IDStr = 'Hyperventilation';
+              case HCEVENT_IMPEDANCE
+                  obj.eventMarkers(i).IDStr = 'Impedance';
               otherwise
                   obj.eventMarkers(i).IDStr = 'UNKNOWN';
           end
