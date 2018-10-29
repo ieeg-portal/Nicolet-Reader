@@ -479,14 +479,15 @@ classdef NicoletFile < handle
       if length(tsPackets) > 1
           warning(['Multiple TSinfo packets detected; using first instance ' ...
             ' ac for all segments. See documentation for info.']);
-      elseif isempty(tsPackets)
-          warning(['No TSINFO found']);
+      end
+      if isempty(tsPackets)
+          warning('No TSINFO found');
       else    
           tsPacket = tsPackets(1);
 
           obj.tsInfo = struct();                  
           elems = typecast(tsPacket.data(753:756),'uint32');        
-          alloc = typecast(tsPacket.data(757:760),'uint32');        
+          %alloc = typecast(tsPacket.data(757:760),'uint32');        
 
           offset = 761;
           for i = 1:elems
